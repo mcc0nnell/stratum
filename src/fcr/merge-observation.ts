@@ -3,6 +3,7 @@ import type { Change } from "../types";
 import type { Logger } from "../utils/logger";
 
 export const FCR_STRATUM_MERGE_OBSERVATION_SCHEMA = "fcr.stratum.merge-observation.v1" as const;
+export const FCR_STRATUM_MERGE_HANDOFF_SCHEMA = "fcr.stratum.merge-handoff.v1" as const;
 
 export type FcrWitnessStatus = "satisfied" | "contradicted" | "unproven";
 
@@ -36,6 +37,27 @@ export interface FcrProtectionVerdict {
   };
 }
 
+export interface FcrMergePremiseSnapshot {
+  source: "stratum.d1.merge-protection-snapshot";
+  evalRunsRead: boolean;
+  reviewsRead: boolean;
+  excludedReviewerId?: string;
+  evalRuns: Array<{
+    id: string;
+    changeId: string;
+    evaluatorType: string;
+    passed: boolean;
+    ranAt: string;
+  }>;
+  reviews: Array<{
+    id: string;
+    changeId: string;
+    reviewerId: string;
+    verdict: "approve" | "request_changes" | "comment";
+    createdAt: string;
+  }>;
+}
+
 export interface FcrMergeObservation {
   schema: typeof FCR_STRATUM_MERGE_OBSERVATION_SCHEMA;
   stage: "merge_protection";
@@ -51,6 +73,7 @@ export interface FcrMergeObservation {
     workspace: string;
     status: Change["status"];
     touchesProtectedConfig: boolean;
+    createdByUserId?: string;
     baseSha?: string;
     evaluatedSha?: string;
     evaluatedTreeOid?: string;
@@ -73,6 +96,16 @@ export interface FcrMergeObservation {
     outcome: "would_admit_to_next_gate" | "would_veto";
     reasons: string[];
   };
+}
+
+export interface FcrMergeHandoff {
+  schema: typeof FCR_STRATUM_MERGE_HANDOFF_SCHEMA;
+  authority: {
+    mode: "observe";
+    commitPermitIssued: false;
+  };
+  observation: FcrMergeObservation;
+  premises: FcrMergePremiseSnapshot;
 }
 
 function evaluatorReason(evaluatorType: string, status: "passed" | "failed" | "missing"): string {
@@ -135,6 +168,7 @@ export function buildFcrMergeObservation(args: {
       workspace: change.workspace,
       status: change.status,
       touchesProtectedConfig: change.touchesProtectedConfig === true,
+      ...(change.createdByUserId !== undefined ? { createdByUserId: change.createdByUserId } : {}),
       ...(change.baseSha !== undefined ? { baseSha: change.baseSha } : {}),
       ...(change.evaluatedSha !== undefined ? { evaluatedSha: change.evaluatedSha } : {}),
       ...(change.evaluatedTreeOid !== undefined
@@ -164,10 +198,33 @@ export function buildFcrMergeObservation(args: {
   };
 }
 
+export function buildFcrMergeHandoff(args: {
+  change: Change;
+  policy: EvalPolicy;
+  protection: FcrProtectionVerdict;
+  premises: FcrMergePremiseSnapshot;
+}): FcrMergeHandoff {
+  return {
+    schema: FCR_STRATUM_MERGE_HANDOFF_SCHEMA,
+    authority: { mode: "observe", commitPermitIssued: false },
+    observation: buildFcrMergeObservation(args),
+    premises: {
+      source: "stratum.d1.merge-protection-snapshot",
+      evalRunsRead: args.premises.evalRunsRead,
+      reviewsRead: args.premises.reviewsRead,
+      ...(args.premises.excludedReviewerId !== undefined
+        ? { excludedReviewerId: args.premises.excludedReviewerId }
+        : {}),
+      evalRuns: args.premises.evalRuns.map((run) => ({ ...run })),
+      reviews: args.premises.reviews.map((review) => ({ ...review })),
+    },
+  };
+}
+
 /**
- * Emit an OBSERVE-only projection of the verdict Stratum already produced.
- * This deliberately performs no persistence or external I/O; a later adapter can
- * admit the structured envelope to WindAnvil without perturbing merge behavior.
+ * Emit the OBSERVE-only reasoning projection and the raw decision-premise handoff.
+ * No new persistence or external I/O is introduced; both objects ride the
+ * existing structured logger and cannot alter the merge verdict.
  */
 export function observeStratumMergeProtection(
   logger: Logger,
@@ -175,10 +232,13 @@ export function observeStratumMergeProtection(
     change: Change;
     policy: EvalPolicy;
     protection: FcrProtectionVerdict;
+    premises: FcrMergePremiseSnapshot;
   },
 ): void {
   try {
-    logger.info("FCR merge protection observed", { fcr: buildFcrMergeObservation(args) });
+    const fcr = buildFcrMergeObservation(args);
+    const fcrHandoff = buildFcrMergeHandoff(args);
+    logger.info("FCR merge protection observed", { fcr, fcrHandoff });
   } catch (error) {
     logger.warn("FCR merge observation failed; merge behavior is unchanged", {
       changeId: args.change.id,
