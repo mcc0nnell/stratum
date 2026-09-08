@@ -1,6 +1,14 @@
 import { diffTouchesProtectedConfig } from "../evaluation/policy-loader";
 import type { EvalPolicy } from "../evaluation/types";
-import { countApprovals } from "../storage/change-reviews";
+import {
+  type FcrMergePremiseSnapshot,
+  observeStratumMergeProtection,
+} from "../fcr/merge-observation";
+import {
+  approvalCountFromReviews,
+  countApprovals,
+  listReviews,
+} from "../storage/change-reviews";
 import { listEvalRuns } from "../storage/eval-runs";
 import type { Change } from "../types";
 import { AppError } from "../utils/errors";
@@ -11,6 +19,19 @@ export interface ProtectionVerdict {
   allowed: boolean;
   /** Human-readable reasons the merge is blocked. Empty when allowed. */
   reasons: string[];
+}
+
+interface ProtectionEvidenceSnapshot {
+  requiredEvaluators: Array<{
+    evaluatorType: string;
+    status: "passed" | "failed" | "missing";
+    runId?: string;
+    ranAt?: string;
+  }>;
+  approvals?: {
+    required: number;
+    observed: number;
+  };
 }
 
 /**
@@ -25,16 +46,43 @@ export async function checkMergeProtection(
   change: Change,
   policy: EvalPolicy,
 ): Promise<Result<ProtectionVerdict, AppError>> {
+  const premises: FcrMergePremiseSnapshot = {
+    source: "stratum.d1.merge-protection-snapshot",
+    evalRunsRead: false,
+    reviewsRead: false,
+    ...(change.createdByUserId !== undefined
+      ? { excludedReviewerId: change.createdByUserId }
+      : {}),
+    evalRuns: [],
+    reviews: [],
+  };
+
+  const observeVerdict = (
+    verdict: ProtectionVerdict,
+    evidence: ProtectionEvidenceSnapshot,
+  ): Result<ProtectionVerdict, AppError> => {
+    observeStratumMergeProtection(logger, {
+      change,
+      policy,
+      protection: { ...verdict, evidence },
+      premises,
+    });
+    return ok(verdict);
+  };
+  const evidence: ProtectionEvidenceSnapshot = { requiredEvaluators: [] };
+
   // Fail closed on a malformed policy file rather than silently running on the
   // permissive default.
   if (policy.configError) {
-    return ok({ allowed: false, reasons: [policy.configError] });
+    return observeVerdict({ allowed: false, reasons: [policy.configError] }, evidence);
   }
 
   const merge = policy.merge;
   // A change that edits the merge-protection config is gated even when the policy
   // has no merge block at all (SA-3), so we can't early-return on a missing merge.
-  if (!merge && !change.touchesProtectedConfig) return ok({ allowed: true, reasons: [] });
+  if (!merge && !change.touchesProtectedConfig) {
+    return observeVerdict({ allowed: true, reasons: [] }, evidence);
+  }
 
   const reasons: string[] = [];
 
@@ -48,11 +96,24 @@ export async function checkMergeProtection(
       );
     }
 
-    const latestByType = new Map<string, { passed: boolean; ranAt: string }>();
+    premises.evalRunsRead = true;
+    premises.evalRuns = runsResult.data.map((run) => ({
+      id: run.id,
+      changeId: run.changeId,
+      evaluatorType: run.evaluatorType,
+      passed: run.passed,
+      ranAt: run.ranAt,
+    }));
+
+    const latestByType = new Map<string, { id: string; passed: boolean; ranAt: string }>();
     for (const run of runsResult.data) {
       const current = latestByType.get(run.evaluatorType);
       if (!current || run.ranAt >= current.ranAt) {
-        latestByType.set(run.evaluatorType, { passed: run.passed, ranAt: run.ranAt });
+        latestByType.set(run.evaluatorType, {
+          id: run.id,
+          passed: run.passed,
+          ranAt: run.ranAt,
+        });
       }
     }
 
@@ -60,8 +121,20 @@ export async function checkMergeProtection(
       const latest = latestByType.get(required);
       if (!latest) {
         reasons.push(`Required evaluator '${required}' has not run`);
-      } else if (!latest.passed) {
-        reasons.push(`Required evaluator '${required}' failed`);
+        evidence.requiredEvaluators.push({
+          evaluatorType: required,
+          status: "missing",
+        });
+      } else {
+        evidence.requiredEvaluators.push({
+          evaluatorType: required,
+          status: latest.passed ? "passed" : "failed",
+          runId: latest.id,
+          ranAt: latest.ranAt,
+        });
+        if (!latest.passed) {
+          reasons.push(`Required evaluator '${required}' failed`);
+        }
       }
     }
   }
@@ -75,15 +148,28 @@ export async function checkMergeProtection(
     change.touchesProtectedConfig ? 1 : 0,
   );
   if (requiredApprovals > 0) {
-    // The change author's own approval must not count toward requiredApprovals —
-    // otherwise a lone writer opens a change, approves it, and self-merges.
-    // createdByUserId is the acting user (or an agent's owner); NULL on legacy
-    // rows, where no author is excluded.
-    const approvalsResult = await countApprovals(db, logger, change.id, change.createdByUserId);
-    if (!approvalsResult.success) return err(approvalsResult.error);
-    if (approvalsResult.data < requiredApprovals) {
+    // Read the exact current review rows and derive the count from that same
+    // snapshot. This preserves the existing approval rule while making the
+    // premises independently reopenable without a second, racy D1 read.
+    const reviewsResult = await listReviews(db, logger, change.id);
+    if (!reviewsResult.success) return err(reviewsResult.error);
+    premises.reviewsRead = true;
+    premises.reviews = reviewsResult.data.map((review) => ({
+      id: review.id,
+      changeId: review.changeId,
+      reviewerId: review.reviewerId,
+      verdict: review.verdict,
+      createdAt: review.createdAt,
+    }));
+
+    const observedApprovals = approvalCountFromReviews(
+      reviewsResult.data,
+      change.createdByUserId,
+    );
+    evidence.approvals = { required: requiredApprovals, observed: observedApprovals };
+    if (observedApprovals < requiredApprovals) {
       reasons.push(
-        `Requires ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"}, has ${approvalsResult.data}`,
+        `Requires ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"}, has ${observedApprovals}`,
       );
     }
   }
@@ -91,7 +177,7 @@ export async function checkMergeProtection(
   if (reasons.length > 0) {
     logger.info("Merge blocked by branch protection", { changeId: change.id, reasons });
   }
-  return ok({ allowed: reasons.length === 0, reasons });
+  return observeVerdict({ allowed: reasons.length === 0, reasons }, evidence);
 }
 
 /**
@@ -109,10 +195,6 @@ export function requiredEvaluatorReasons(
 
   const passedByType = new Map<string, boolean>();
   for (const { evaluatorType, result } of evalRuns) {
-    // A policy may list the same evaluator type more than once (e.g. two diff
-    // evaluators with different forbiddenPatterns). Fold duplicates with AND:
-    // a required type passes only when every run of it passed, so a passing
-    // duplicate can never mask a failure.
     passedByType.set(evaluatorType, (passedByType.get(evaluatorType) ?? true) && result.passed);
   }
 
@@ -132,30 +214,9 @@ export function requiredEvaluatorReasons(
  * Merge-protection check for a manual conflict resolution (issue #260,
  * SA-5 follow-up).
  *
- * A manual resolution has no Change row of its own — its content exists only
- * as the caller-supplied {file, content} pairs, evaluated once, inline, right
- * before resolveConflict pushes. That shapes two deliberate differences from
- * `checkMergeProtection`:
- *
- * - `requiredEvaluators` is checked against the `evalRuns` this exact
- *   resolution diff just produced (passed in), not a DB history keyed by some
- *   change id — there is no earlier row for THIS content, and the whole point
- *   of this gate is judging it, not whatever an earlier, different diff
- *   scored.
- * - `requiredApprovals` is checked against the approvals already recorded on
- *   `originatingChange`, the Change whose merge attempt produced this
- *   conflict. Resolving a conflict is part of landing that already-reviewed
- *   change, not a new change of its own — there is no UI to grant a fresh
- *   approval against the exact resolved bytes — so it reuses that change's
- *   review trail (still excluding the change author's own approval, same as
- *   `checkMergeProtection`). When no originating change is known (only
- *   possible for a conflict recorded before this check existed), any
- *   required approval fails closed rather than being silently skipped.
- *
- * `touchesProtectedConfig` is computed fresh from the resolution's own diff
- * rather than copied from the originating change: the resolution can add,
- * remove, or leave alone a `.stratum/policy.yaml` edit independently of what
- * the original change's diff did (SA-3).
+ * This remains outside the FCR observation slice in this PR. Its semantics are
+ * unchanged and continue to use the existing count query for originating-change
+ * approvals.
  */
 export async function checkResolutionMergeProtection(
   db: D1Database,

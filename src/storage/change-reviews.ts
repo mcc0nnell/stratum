@@ -250,7 +250,6 @@ export async function submitReview(
 
   try {
     if (opts.verdict === "comment") {
-      // Only record 'comment' when no verdict exists; never clobber one.
       await db
         .prepare(
           `INSERT INTO change_reviews (id, change_id, reviewer_id, verdict, comment, created_at)
@@ -270,8 +269,6 @@ export async function submitReview(
         reviewerId: opts.reviewerId,
         existingVerdictKept: row !== null && row.id !== id,
       });
-      // Return the row that is actually current: the fresh 'comment' row, or
-      // the untouched pre-existing verdict.
       return ok(
         row
           ? rowToReview(row)
@@ -335,6 +332,22 @@ export async function listReviews(
 }
 
 /**
+ * Deterministically reduce an exact review snapshot to the approval count used
+ * by merge protection. This mirrors `countApprovals` but lets FCR carry the
+ * decision-relevant source rows into an external handoff without re-reading D1.
+ */
+export function approvalCountFromReviews(
+  reviews: readonly ChangeReview[],
+  excludeUserId?: string,
+): number {
+  return reviews.filter(
+    (review) =>
+      review.verdict === "approve" &&
+      (excludeUserId === undefined || review.reviewerId !== excludeUserId),
+  ).length;
+}
+
+/**
  * Build (without running) the statement that deletes every 'approve' verdict
  * on a change. Shared by `dismissApprovals` and the atomic
  * `dismissApprovalsAndUpdateStatus` batch in storage/changes.ts (#238) so both
@@ -351,18 +364,6 @@ export function buildDismissApprovalsStatement(
     .bind(changeId);
 }
 
-/**
- * Dismiss every 'approve' verdict on a change because its evaluated revision
- * changed (#193) — those approvals were given for different code and must not
- * count toward requiredApprovals. 'request_changes' verdicts are kept, matching
- * GitHub's dismiss-stale-approvals-on-push semantics. Returns the reviewer IDs
- * whose approvals were dismissed, so callers can record who was dismissed.
- *
- * This runs the DELETE on its own, with no accompanying write — for the
- * re-evaluate route, which must also re-pin evaluatedSha/status atomically
- * with this dismissal, use `dismissApprovalsAndUpdateStatus` in
- * storage/changes.ts instead (#238).
- */
 export async function dismissApprovals(
   db: D1Database,
   logger: Logger,
@@ -399,8 +400,6 @@ export async function countApprovals(
   excludeUserId?: string,
 ): Promise<Result<number, AppError>> {
   try {
-    // change_reviews keys the approver on reviewer_id (author_type/author_id are on
-    // change_comments, a different table) — filter on the column that actually exists.
     const sql = excludeUserId
       ? "SELECT COUNT(*) AS approvals FROM change_reviews WHERE change_id = ? AND verdict = 'approve' AND reviewer_id != ?"
       : "SELECT COUNT(*) AS approvals FROM change_reviews WHERE change_id = ? AND verdict = 'approve'";
