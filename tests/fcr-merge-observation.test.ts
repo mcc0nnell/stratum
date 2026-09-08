@@ -41,13 +41,11 @@ describe("buildFcrMergeObservation", () => {
             {
               evaluatorType: "secret_scan",
               status: "missing",
-              reason: "Required evaluator 'secret_scan' has not run",
             },
             {
               evaluatorType: "diff",
               status: "passed",
-              reason: "diff acceptable",
-              score: 0.92,
+              runId: "evl_diff_latest",
               ranAt: "2026-09-08T12:00:00.000Z",
             },
           ],
@@ -71,11 +69,22 @@ describe("buildFcrMergeObservation", () => {
     expect(observation.policy.requiredEvaluators).toEqual(["diff", "secret_scan"]);
     expect(observation.policy.effectiveRequiredApprovals).toBe(2);
     expect(observation.evidence.snapshotSource).toBe("merge_protection_verdict");
-    expect(observation.evidence.witnesses.map((witness) => [witness.id, witness.status])).toEqual([
-      ["approval:human", "contradicted"],
-      ["evaluator:diff", "satisfied"],
-      ["evaluator:secret_scan", "unproven"],
+    expect(
+      observation.evidence.witnesses.map((witness) => [
+        witness.id,
+        witness.kind,
+        witness.status,
+        witness.evaluatorType,
+      ]),
+    ).toEqual([
+      ["approval:human", "approval", "contradicted", undefined],
+      ["evaluator:diff:1", "evaluator", "satisfied", "diff"],
+      ["evaluator:secret_scan:0", "evaluator", "unproven", "secret_scan"],
     ]);
+    expect(observation.evidence.witnesses[1]).toMatchObject({
+      sourceRef: "evl_diff_latest",
+      observedAt: "2026-09-08T12:00:00.000Z",
+    });
     expect(observation.advisoryJudgment.outcome).toBe("would_veto");
   });
 
