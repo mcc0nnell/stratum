@@ -107,8 +107,7 @@ describe("FCR merge-protection observation", () => {
             {
               evaluatorType: "diff",
               status: "passed",
-              reason: "latest pass",
-              score: 0.92,
+              runId: "evl_new",
               ranAt: "2026-09-08T12:00:00.000Z",
             },
           ],
