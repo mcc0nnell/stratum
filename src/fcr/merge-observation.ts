@@ -1,6 +1,10 @@
 import type { EvalPolicy } from "../evaluation/types";
 import type { Change } from "../types";
 import type { Logger } from "../utils/logger";
+import {
+  currentFcrStratumDeploymentIdentity,
+  type FcrStratumDeploymentIdentity,
+} from "./deployment-identity";
 
 export const FCR_STRATUM_MERGE_OBSERVATION_SCHEMA = "fcr.stratum.merge-observation.v1" as const;
 export const FCR_STRATUM_MERGE_HANDOFF_SCHEMA = "fcr.stratum.merge-handoff.v1" as const;
@@ -104,6 +108,7 @@ export interface FcrMergeHandoff {
     mode: "observe";
     commitPermitIssued: false;
   };
+  producerDeployment?: FcrStratumDeploymentIdentity;
   observation: FcrMergeObservation;
   premises: FcrMergePremiseSnapshot;
 }
@@ -203,10 +208,14 @@ export function buildFcrMergeHandoff(args: {
   policy: EvalPolicy;
   protection: FcrProtectionVerdict;
   premises: FcrMergePremiseSnapshot;
+  producerDeployment?: FcrStratumDeploymentIdentity;
 }): FcrMergeHandoff {
   return {
     schema: FCR_STRATUM_MERGE_HANDOFF_SCHEMA,
     authority: { mode: "observe", commitPermitIssued: false },
+    ...(args.producerDeployment !== undefined
+      ? { producerDeployment: { ...args.producerDeployment } }
+      : {}),
     observation: buildFcrMergeObservation(args),
     premises: {
       source: "stratum.d1.merge-protection-snapshot",
@@ -237,7 +246,11 @@ export function observeStratumMergeProtection(
 ): void {
   try {
     const fcr = buildFcrMergeObservation(args);
-    const fcrHandoff = buildFcrMergeHandoff(args);
+    const producerDeployment = currentFcrStratumDeploymentIdentity();
+    const fcrHandoff = buildFcrMergeHandoff({
+      ...args,
+      ...(producerDeployment !== undefined ? { producerDeployment } : {}),
+    });
     logger.info("FCR merge protection observed", { fcr, fcrHandoff });
   } catch (error) {
     logger.warn("FCR merge observation failed; merge behavior is unchanged", {
