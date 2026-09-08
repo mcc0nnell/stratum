@@ -12,8 +12,8 @@ export interface FcrMergeWitness {
   required: true;
   status: FcrWitnessStatus;
   reason: string;
-  score?: number;
-  ranAt?: string;
+  sourceRef?: string;
+  observedAt?: string;
   requiredCount?: number;
   observedCount?: number;
 }
@@ -25,8 +25,7 @@ export interface FcrProtectionVerdict {
     requiredEvaluators: Array<{
       evaluatorType: string;
       status: "passed" | "failed" | "missing";
-      reason: string;
-      score?: number;
+      runId?: string;
       ranAt?: string;
     }>;
     approvals?: {
@@ -75,6 +74,11 @@ export interface FcrMergeObservation {
   };
 }
 
+function evaluatorReason(evaluatorType: string, status: "passed" | "failed" | "missing"): string {
+  if (status === "missing") return `Required evaluator '${evaluatorType}' has not run`;
+  return `Required evaluator '${evaluatorType}' ${status}`;
+}
+
 export function buildFcrMergeObservation(args: {
   change: Change;
   policy: EvalPolicy;
@@ -82,8 +86,8 @@ export function buildFcrMergeObservation(args: {
 }): FcrMergeObservation {
   const { change, policy, protection } = args;
   const witnesses: FcrMergeWitness[] = protection.evidence.requiredEvaluators.map(
-    (evidence) => ({
-      id: `evaluator:${evidence.evaluatorType}`,
+    (evidence, index) => ({
+      id: `evaluator:${evidence.evaluatorType}:${index}`,
       kind: "evaluator",
       required: true,
       status:
@@ -92,9 +96,9 @@ export function buildFcrMergeObservation(args: {
           : evidence.status === "failed"
             ? "contradicted"
             : "unproven",
-      reason: evidence.reason,
-      ...(evidence.score !== undefined ? { score: evidence.score } : {}),
-      ...(evidence.ranAt !== undefined ? { ranAt: evidence.ranAt } : {}),
+      reason: evaluatorReason(evidence.evaluatorType, evidence.status),
+      ...(evidence.runId !== undefined ? { sourceRef: evidence.runId } : {}),
+      ...(evidence.ranAt !== undefined ? { observedAt: evidence.ranAt } : {}),
     }),
   );
 
