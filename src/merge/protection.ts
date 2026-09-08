@@ -1,5 +1,6 @@
 import { diffTouchesProtectedConfig } from "../evaluation/policy-loader";
 import type { EvalPolicy } from "../evaluation/types";
+import { observeStratumMergeProtection } from "../fcr/merge-observation";
 import { countApprovals } from "../storage/change-reviews";
 import { listEvalRuns } from "../storage/eval-runs";
 import type { Change } from "../types";
@@ -11,6 +12,20 @@ export interface ProtectionVerdict {
   allowed: boolean;
   /** Human-readable reasons the merge is blocked. Empty when allowed. */
   reasons: string[];
+}
+
+interface ProtectionEvidenceSnapshot {
+  requiredEvaluators: Array<{
+    evaluatorType: string;
+    status: "passed" | "failed" | "missing";
+    reason: string;
+    score?: number;
+    ranAt?: string;
+  }>;
+  approvals?: {
+    required: number;
+    observed: number;
+  };
 }
 
 /**
@@ -25,16 +40,31 @@ export async function checkMergeProtection(
   change: Change,
   policy: EvalPolicy,
 ): Promise<Result<ProtectionVerdict, AppError>> {
+  const observeVerdict = async (
+    verdict: ProtectionVerdict,
+    evidence: ProtectionEvidenceSnapshot,
+  ): Promise<Result<ProtectionVerdict, AppError>> => {
+    await observeStratumMergeProtection(db, logger, {
+      change,
+      policy,
+      protection: { ...verdict, evidence },
+    });
+    return ok(verdict);
+  };
+  const evidence: ProtectionEvidenceSnapshot = { requiredEvaluators: [] };
+
   // Fail closed on a malformed policy file rather than silently running on the
   // permissive default.
   if (policy.configError) {
-    return ok({ allowed: false, reasons: [policy.configError] });
+    return observeVerdict({ allowed: false, reasons: [policy.configError] }, evidence);
   }
 
   const merge = policy.merge;
   // A change that edits the merge-protection config is gated even when the policy
   // has no merge block at all (SA-3), so we can't early-return on a missing merge.
-  if (!merge && !change.touchesProtectedConfig) return ok({ allowed: true, reasons: [] });
+  if (!merge && !change.touchesProtectedConfig) {
+    return observeVerdict({ allowed: true, reasons: [] }, evidence);
+  }
 
   const reasons: string[] = [];
 
@@ -48,20 +78,43 @@ export async function checkMergeProtection(
       );
     }
 
-    const latestByType = new Map<string, { passed: boolean; ranAt: string }>();
+    const latestByType = new Map<
+      string,
+      { passed: boolean; ranAt: string; reason: string; score: number }
+    >();
     for (const run of runsResult.data) {
       const current = latestByType.get(run.evaluatorType);
       if (!current || run.ranAt >= current.ranAt) {
-        latestByType.set(run.evaluatorType, { passed: run.passed, ranAt: run.ranAt });
+        latestByType.set(run.evaluatorType, {
+          passed: run.passed,
+          ranAt: run.ranAt,
+          reason: run.reason,
+          score: run.score,
+        });
       }
     }
 
     for (const required of merge.requiredEvaluators) {
       const latest = latestByType.get(required);
       if (!latest) {
-        reasons.push(`Required evaluator '${required}' has not run`);
-      } else if (!latest.passed) {
-        reasons.push(`Required evaluator '${required}' failed`);
+        const reason = `Required evaluator '${required}' has not run`;
+        reasons.push(reason);
+        evidence.requiredEvaluators.push({
+          evaluatorType: required,
+          status: "missing",
+          reason,
+        });
+      } else {
+        evidence.requiredEvaluators.push({
+          evaluatorType: required,
+          status: latest.passed ? "passed" : "failed",
+          reason: latest.reason,
+          score: latest.score,
+          ranAt: latest.ranAt,
+        });
+        if (!latest.passed) {
+          reasons.push(`Required evaluator '${required}' failed`);
+        }
       }
     }
   }
@@ -81,6 +134,7 @@ export async function checkMergeProtection(
     // rows, where no author is excluded.
     const approvalsResult = await countApprovals(db, logger, change.id, change.createdByUserId);
     if (!approvalsResult.success) return err(approvalsResult.error);
+    evidence.approvals = { required: requiredApprovals, observed: approvalsResult.data };
     if (approvalsResult.data < requiredApprovals) {
       reasons.push(
         `Requires ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"}, has ${approvalsResult.data}`,
@@ -91,7 +145,7 @@ export async function checkMergeProtection(
   if (reasons.length > 0) {
     logger.info("Merge blocked by branch protection", { changeId: change.id, reasons });
   }
-  return ok({ allowed: reasons.length === 0, reasons });
+  return observeVerdict({ allowed: reasons.length === 0, reasons }, evidence);
 }
 
 /**
