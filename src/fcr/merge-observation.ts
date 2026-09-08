@@ -1,9 +1,8 @@
 import type { EvalPolicy } from "../evaluation/types";
-import type { ProtectionVerdict } from "../merge/protection";
 import { recordAudit } from "../storage/audit";
 import { countApprovals } from "../storage/change-reviews";
 import { type EvalRun, listEvalRuns } from "../storage/eval-runs";
-import type { Change, ProjectEntry } from "../types";
+import type { Change } from "../types";
 import type { Logger } from "../utils/logger";
 
 export const FCR_STRATUM_MERGE_OBSERVATION_SCHEMA = "fcr.stratum.merge-observation.v1" as const;
@@ -36,7 +35,6 @@ export interface FcrMergeObservation {
     project: string;
     workspace: string;
     status: Change["status"];
-    strategy: "merge" | "squash";
     baseSha?: string;
     evaluatedSha?: string;
     evaluatedTreeOid?: string;
@@ -61,6 +59,11 @@ export interface FcrMergeObservation {
   };
 }
 
+export interface FcrProtectionVerdict {
+  allowed: boolean;
+  reasons: string[];
+}
+
 function latestRunsByEvaluator(runs: EvalRun[]): Map<string, EvalRun> {
   const latest = new Map<string, EvalRun>();
   for (const run of runs) {
@@ -78,16 +81,14 @@ function latestRunsByEvaluator(runs: EvalRun[]): Map<string, EvalRun> {
 
 export function buildFcrMergeObservation(args: {
   change: Change;
-  project: ProjectEntry;
   policy: EvalPolicy;
-  protection: ProtectionVerdict;
-  strategy: "merge" | "squash";
+  protection: FcrProtectionVerdict;
   evalRuns: EvalRun[];
   evaluatorRunsAvailable: boolean;
   approvalCount?: number;
   approvalsAvailable: boolean;
 }): FcrMergeObservation {
-  const { change, project, policy, protection, strategy } = args;
+  const { change, policy, protection } = args;
   const requiredEvaluators = [...(policy.merge?.requiredEvaluators ?? [])].sort();
   const requiredEvaluatorSet = new Set(requiredEvaluators);
   const latestRuns = latestRunsByEvaluator(args.evalRuns);
@@ -152,11 +153,10 @@ export function buildFcrMergeObservation(args: {
     candidate: {
       kind: "stratum.change.merge",
       changeId: change.id,
-      projectId: change.projectId ?? project.id,
+      projectId: change.projectId ?? change.project,
       project: change.project,
       workspace: change.workspace,
       status: change.status,
-      strategy,
       ...(change.baseSha !== undefined ? { baseSha: change.baseSha } : {}),
       ...(change.evaluatedSha !== undefined ? { evaluatedSha: change.evaluatedSha } : {}),
       ...(change.evaluatedTreeOid !== undefined
@@ -196,10 +196,8 @@ export async function observeStratumMergeProtection(
   logger: Logger,
   args: {
     change: Change;
-    project: ProjectEntry;
     policy: EvalPolicy;
-    protection: ProtectionVerdict;
-    strategy: "merge" | "squash";
+    protection: FcrProtectionVerdict;
   },
 ): Promise<void> {
   try {
