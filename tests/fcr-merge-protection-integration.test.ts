@@ -30,17 +30,25 @@ interface EvalRunRow {
   ran_at: string;
 }
 
-function makeD1(opts: { runs?: EvalRunRow[]; approvals?: number }): D1Database {
+interface ReviewRow {
+  id: string;
+  change_id: string;
+  reviewer_id: string;
+  verdict: "approve" | "request_changes" | "comment";
+  comment: string | null;
+  created_at: string;
+}
+
+function makeD1(opts: { runs?: EvalRunRow[]; reviews?: ReviewRow[] }): D1Database {
   function makeStmt(sql: string, bindings: unknown[]) {
     const upper = sql.trim().toUpperCase();
     return {
       bind: (...args: unknown[]) => makeStmt(sql, args),
-      first: async <T>() => {
-        if (upper.includes("COUNT(*)")) return { approvals: opts.approvals ?? 0 } as T;
-        return null;
-      },
+      first: async <T>() => null as T | null,
       all: async <T>() => {
-        const results = (opts.runs ?? []).filter((run) => run.change_id === bindings[0]);
+        const results = upper.includes("FROM CHANGE_REVIEWS")
+          ? (opts.reviews ?? []).filter((review) => review.change_id === bindings[0])
+          : (opts.runs ?? []).filter((run) => run.change_id === bindings[0]);
         return { results: results as T[], success: true, meta: {} };
       },
     };
@@ -59,10 +67,27 @@ const change: Change = {
 };
 
 describe("FCR merge-protection observation", () => {
-  it("binds FCR evidence to the exact evaluator and approval snapshot used by the verdict", async () => {
+  it("binds FCR evidence to the exact evaluator and approval rows used by the verdict", async () => {
     vi.mocked(observeStratumMergeProtection).mockClear();
     const db = makeD1({
-      approvals: 1,
+      reviews: [
+        {
+          id: "rev_author",
+          change_id: change.id,
+          reviewer_id: "usr_author",
+          verdict: "approve",
+          comment: "self approval does not count",
+          created_at: "2026-09-08T11:40:00.000Z",
+        },
+        {
+          id: "rev_human",
+          change_id: change.id,
+          reviewer_id: "usr_reviewer",
+          verdict: "approve",
+          comment: "looks good",
+          created_at: "2026-09-08T11:45:00.000Z",
+        },
+      ],
       runs: [
         {
           id: "evl_old",
@@ -114,13 +139,51 @@ describe("FCR merge-protection observation", () => {
           approvals: { required: 2, observed: 1 },
         },
       },
+      premises: {
+        source: "stratum.d1.merge-protection-snapshot",
+        evalRunsRead: true,
+        reviewsRead: true,
+        excludedReviewerId: "usr_author",
+        evalRuns: [
+          {
+            id: "evl_old",
+            changeId: change.id,
+            evaluatorType: "diff",
+            passed: false,
+            ranAt: "2026-09-08T11:00:00.000Z",
+          },
+          {
+            id: "evl_new",
+            changeId: change.id,
+            evaluatorType: "diff",
+            passed: true,
+            ranAt: "2026-09-08T12:00:00.000Z",
+          },
+        ],
+        reviews: [
+          {
+            id: "rev_author",
+            changeId: change.id,
+            reviewerId: "usr_author",
+            verdict: "approve",
+            createdAt: "2026-09-08T11:40:00.000Z",
+          },
+          {
+            id: "rev_human",
+            changeId: change.id,
+            reviewerId: "usr_reviewer",
+            verdict: "approve",
+            createdAt: "2026-09-08T11:45:00.000Z",
+          },
+        ],
+      },
     });
   });
 
-  it("captures the implicit human gate for a change that edits protected configuration", async () => {
+  it("captures the implicit human gate with an explicit empty review snapshot", async () => {
     vi.mocked(observeStratumMergeProtection).mockClear();
     const protectedChange: Change = { ...change, touchesProtectedConfig: true };
-    const db = makeD1({ approvals: 0 });
+    const db = makeD1({ reviews: [] });
     const policy: EvalPolicy = { evaluators: [{ type: "diff" }] };
 
     const result = await checkMergeProtection(db, mockLogger, protectedChange, policy);
@@ -138,6 +201,14 @@ describe("FCR merge-protection observation", () => {
           requiredEvaluators: [],
           approvals: { required: 1, observed: 0 },
         },
+      },
+      premises: {
+        source: "stratum.d1.merge-protection-snapshot",
+        evalRunsRead: false,
+        reviewsRead: true,
+        excludedReviewerId: "usr_author",
+        evalRuns: [],
+        reviews: [],
       },
     });
   });
