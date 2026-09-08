@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { EvalPolicy } from "../src/evaluation/types";
-import { buildFcrMergeObservation } from "../src/fcr/merge-observation";
+import {
+  buildFcrMergeHandoff,
+  buildFcrMergeObservation,
+} from "../src/fcr/merge-observation";
 import type { Change } from "../src/types";
 
 const change: Change = {
@@ -9,6 +12,7 @@ const change: Change = {
   projectId: "prj_1",
   workspace: "agent-work",
   status: "accepted",
+  createdByUserId: "usr_author",
   baseSha: "base_1",
   evaluatedSha: "commit_1",
   evaluatedTreeOid: "tree_1",
@@ -38,10 +42,7 @@ describe("buildFcrMergeObservation", () => {
         reasons: ["Required evaluator 'secret_scan' has not run", "Requires 2 approvals, has 1"],
         evidence: {
           requiredEvaluators: [
-            {
-              evaluatorType: "secret_scan",
-              status: "missing",
-            },
+            { evaluatorType: "secret_scan", status: "missing" },
             {
               evaluatorType: "diff",
               status: "passed",
@@ -60,6 +61,7 @@ describe("buildFcrMergeObservation", () => {
       kind: "stratum.change.merge",
       changeId: change.id,
       projectId: "prj_1",
+      createdByUserId: "usr_author",
       evaluatedSha: "commit_1",
       evaluatedTreeOid: "tree_1",
       workspaceHeadSha: "commit_1",
@@ -124,5 +126,82 @@ describe("buildFcrMergeObservation", () => {
       },
     ]);
     expect(observation.authority.commitPermitIssued).toBe(false);
+  });
+
+  it("packages exact decision-relevant premise rows without comments or evaluator payloads", () => {
+    const handoff = buildFcrMergeHandoff({
+      change,
+      policy: {
+        evaluators: [{ type: "diff" }],
+        merge: { requiredEvaluators: ["diff"], requiredApprovals: 1 },
+      },
+      protection: {
+        allowed: true,
+        reasons: [],
+        evidence: {
+          requiredEvaluators: [
+            {
+              evaluatorType: "diff",
+              status: "passed",
+              runId: "evl_latest",
+              ranAt: "2026-09-08T12:00:00.000Z",
+            },
+          ],
+          approvals: { required: 1, observed: 1 },
+        },
+      },
+      premises: {
+        source: "stratum.d1.merge-protection-snapshot",
+        evalRunsRead: true,
+        reviewsRead: true,
+        excludedReviewerId: "usr_author",
+        evalRuns: [
+          {
+            id: "evl_latest",
+            changeId: change.id,
+            evaluatorType: "diff",
+            passed: true,
+            ranAt: "2026-09-08T12:00:00.000Z",
+          },
+        ],
+        reviews: [
+          {
+            id: "rev_reviewer",
+            changeId: change.id,
+            reviewerId: "usr_reviewer",
+            verdict: "approve",
+            createdAt: "2026-09-08T11:50:00.000Z",
+          },
+        ],
+      },
+    });
+
+    expect(handoff.schema).toBe("fcr.stratum.merge-handoff.v1");
+    expect(handoff.authority).toEqual({ mode: "observe", commitPermitIssued: false });
+    expect(handoff.observation.advisoryJudgment.outcome).toBe("would_admit_to_next_gate");
+    expect(handoff.premises).toEqual({
+      source: "stratum.d1.merge-protection-snapshot",
+      evalRunsRead: true,
+      reviewsRead: true,
+      excludedReviewerId: "usr_author",
+      evalRuns: [
+        {
+          id: "evl_latest",
+          changeId: change.id,
+          evaluatorType: "diff",
+          passed: true,
+          ranAt: "2026-09-08T12:00:00.000Z",
+        },
+      ],
+      reviews: [
+        {
+          id: "rev_reviewer",
+          changeId: change.id,
+          reviewerId: "usr_reviewer",
+          verdict: "approve",
+          createdAt: "2026-09-08T11:50:00.000Z",
+        },
+      ],
+    });
   });
 });
