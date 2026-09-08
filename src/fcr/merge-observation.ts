@@ -1,5 +1,4 @@
 import type { EvalPolicy } from "../evaluation/types";
-import { recordAudit } from "../storage/audit";
 import type { Change } from "../types";
 import type { Logger } from "../utils/logger";
 
@@ -82,30 +81,33 @@ export function buildFcrMergeObservation(args: {
   protection: FcrProtectionVerdict;
 }): FcrMergeObservation {
   const { change, policy, protection } = args;
-  const witnesses: FcrMergeWitness[] = protection.evidence.requiredEvaluators.map((evidence) => ({
-    id: `evaluator:${evidence.evaluatorType}`,
-    kind: "evaluator",
-    required: true,
-    status:
-      evidence.status === "passed"
-        ? "satisfied"
-        : evidence.status === "failed"
-          ? "contradicted"
-          : "unproven",
-    reason: evidence.reason,
-    ...(evidence.score !== undefined ? { score: evidence.score } : {}),
-    ...(evidence.ranAt !== undefined ? { ranAt: evidence.ranAt } : {}),
-  }));
+  const witnesses: FcrMergeWitness[] = protection.evidence.requiredEvaluators.map(
+    (evidence) => ({
+      id: `evaluator:${evidence.evaluatorType}`,
+      kind: "evaluator",
+      required: true,
+      status:
+        evidence.status === "passed"
+          ? "satisfied"
+          : evidence.status === "failed"
+            ? "contradicted"
+            : "unproven",
+      reason: evidence.reason,
+      ...(evidence.score !== undefined ? { score: evidence.score } : {}),
+      ...(evidence.ranAt !== undefined ? { ranAt: evidence.ranAt } : {}),
+    }),
+  );
 
   const approvalEvidence = protection.evidence.approvals;
   if (approvalEvidence !== undefined) {
+    const approvalNoun = approvalEvidence.required === 1 ? "approval" : "approvals";
     witnesses.push({
       id: "approval:human",
       kind: "approval",
       required: true,
       status:
         approvalEvidence.observed >= approvalEvidence.required ? "satisfied" : "contradicted",
-      reason: `Requires ${approvalEvidence.required} approval${approvalEvidence.required === 1 ? "" : "s"}, has ${approvalEvidence.observed}`,
+      reason: `Requires ${approvalEvidence.required} ${approvalNoun}, has ${approvalEvidence.observed}`,
       requiredCount: approvalEvidence.required,
       observedCount: approvalEvidence.observed,
     });
@@ -157,27 +159,20 @@ export function buildFcrMergeObservation(args: {
 }
 
 /**
- * Persist an OBSERVE-only projection of the verdict Stratum already produced.
- * The envelope contains only evidence captured by that verdict; it never re-reads
- * mutable evaluator or approval state after the decision.
+ * Emit an OBSERVE-only projection of the verdict Stratum already produced.
+ * This deliberately performs no persistence or external I/O; a later adapter can
+ * admit the structured envelope to WindAnvil without perturbing merge behavior.
  */
-export async function observeStratumMergeProtection(
-  db: D1Database,
+export function observeStratumMergeProtection(
   logger: Logger,
   args: {
     change: Change;
     policy: EvalPolicy;
     protection: FcrProtectionVerdict;
   },
-): Promise<void> {
+): void {
   try {
-    const observation = buildFcrMergeObservation(args);
-    await recordAudit(db, logger, {
-      action: "fcr.merge.observed",
-      actorType: "system",
-      subject: args.change.id,
-      detail: { fcr: observation },
-    });
+    logger.info("FCR merge protection observed", { fcr: buildFcrMergeObservation(args) });
   } catch (error) {
     logger.warn("FCR merge observation failed; merge behavior is unchanged", {
       changeId: args.change.id,
