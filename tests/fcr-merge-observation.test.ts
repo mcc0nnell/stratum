@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EvalPolicy } from "../src/evaluation/types";
 import { buildFcrMergeObservation } from "../src/fcr/merge-observation";
-import type { EvalRun } from "../src/storage/eval-runs";
 import type { Change } from "../src/types";
 
 const change: Change = {
@@ -17,21 +16,8 @@ const change: Change = {
   createdAt: "2026-09-08T12:00:00.000Z",
 };
 
-function run(overrides: Partial<EvalRun>): EvalRun {
-  return {
-    id: "evl_1",
-    changeId: change.id,
-    evaluatorType: "diff",
-    score: 1,
-    passed: true,
-    reason: "ok",
-    ranAt: "2026-09-08T12:00:00.000Z",
-    ...overrides,
-  };
-}
-
 describe("buildFcrMergeObservation", () => {
-  it("projects Stratum protection evidence into an OBSERVE-only FCR envelope", () => {
+  it("projects the exact protection snapshot into an OBSERVE-only FCR envelope", () => {
     const policy: EvalPolicy = {
       evaluators: [{ type: "webhook", url: "https://ci.example.test/evaluate" }, { type: "diff" }],
       merge: {
@@ -40,17 +26,6 @@ describe("buildFcrMergeObservation", () => {
         requireFreshBase: true,
       },
     };
-    const evalRuns: EvalRun[] = [
-      run({ id: "evl_old", passed: false, ranAt: "2026-09-08T11:00:00.000Z" }),
-      run({ id: "evl_new", passed: true, ranAt: "2026-09-08T12:00:00.000Z" }),
-      run({
-        id: "evl_webhook",
-        evaluatorType: "webhook",
-        score: 0,
-        passed: false,
-        reason: "external evidence unavailable",
-      }),
-    ];
 
     const observation = buildFcrMergeObservation({
       change,
@@ -58,11 +33,24 @@ describe("buildFcrMergeObservation", () => {
       protection: {
         allowed: false,
         reasons: ["Required evaluator 'secret_scan' has not run", "Requires 2 approvals, has 1"],
+        evidence: {
+          requiredEvaluators: [
+            {
+              evaluatorType: "secret_scan",
+              status: "missing",
+              reason: "Required evaluator 'secret_scan' has not run",
+            },
+            {
+              evaluatorType: "diff",
+              status: "passed",
+              reason: "diff acceptable",
+              score: 0.92,
+              ranAt: "2026-09-08T12:00:00.000Z",
+            },
+          ],
+          approvals: { required: 2, observed: 1 },
+        },
       },
-      evalRuns,
-      evaluatorRunsAvailable: true,
-      approvalCount: 1,
-      approvalsAvailable: true,
     });
 
     expect(observation.schema).toBe("fcr.stratum.merge-observation.v1");
@@ -77,41 +65,40 @@ describe("buildFcrMergeObservation", () => {
     });
     expect(observation.policy.configuredEvaluators).toEqual(["diff", "webhook"]);
     expect(observation.policy.requiredEvaluators).toEqual(["diff", "secret_scan"]);
+    expect(observation.evidence.snapshotSource).toBe("merge_protection_verdict");
     expect(observation.evidence.witnesses.map((witness) => [witness.id, witness.status])).toEqual([
       ["approval:human", "contradicted"],
       ["evaluator:diff", "satisfied"],
       ["evaluator:secret_scan", "unproven"],
-      ["evaluator:webhook", "contradicted"],
     ]);
     expect(observation.advisoryJudgment.outcome).toBe("would_veto");
   });
 
-  it("marks unavailable supporting evidence as unproven without manufacturing authority", () => {
+  it("preserves missing evidence as unproven without manufacturing authority", () => {
     const policy: EvalPolicy = {
       evaluators: [{ type: "diff" }],
-      merge: { requiredEvaluators: ["diff"], requiredApprovals: 1 },
+      merge: { requiredEvaluators: ["diff"] },
     };
 
     const observation = buildFcrMergeObservation({
       change,
       policy,
-      protection: { allowed: false, reasons: ["Required evaluator 'diff' has not run"] },
-      evalRuns: [],
-      evaluatorRunsAvailable: false,
-      approvalsAvailable: false,
+      protection: {
+        allowed: false,
+        reasons: ["Required evaluator 'diff' has not run"],
+        evidence: {
+          requiredEvaluators: [
+            {
+              evaluatorType: "diff",
+              status: "missing",
+              reason: "Required evaluator 'diff' has not run",
+            },
+          ],
+        },
+      },
     });
 
-    expect(observation.evidence.evaluatorRunsAvailable).toBe(false);
-    expect(observation.evidence.approvalsAvailable).toBe(false);
     expect(observation.evidence.witnesses).toEqual([
-      {
-        id: "approval:human",
-        kind: "approval",
-        required: true,
-        status: "unproven",
-        reason: "Required approval count could not be observed (requires 1)",
-        requiredCount: 1,
-      },
       {
         id: "evaluator:diff",
         kind: "evaluator",
