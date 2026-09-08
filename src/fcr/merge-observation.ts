@@ -51,6 +51,7 @@ export interface FcrMergeObservation {
     project: string;
     workspace: string;
     status: Change["status"];
+    touchesProtectedConfig: boolean;
     baseSha?: string;
     evaluatedSha?: string;
     evaluatedTreeOid?: string;
@@ -60,6 +61,7 @@ export interface FcrMergeObservation {
     configuredEvaluators: string[];
     requiredEvaluators: string[];
     requiredApprovals: number;
+    effectiveRequiredApprovals: number;
     requireFreshBase: boolean;
     allowForce: boolean;
     configError?: string;
@@ -124,6 +126,7 @@ export function buildFcrMergeObservation(args: {
       project: change.project,
       workspace: change.workspace,
       status: change.status,
+      touchesProtectedConfig: change.touchesProtectedConfig === true,
       ...(change.baseSha !== undefined ? { baseSha: change.baseSha } : {}),
       ...(change.evaluatedSha !== undefined ? { evaluatedSha: change.evaluatedSha } : {}),
       ...(change.evaluatedTreeOid !== undefined
@@ -137,6 +140,7 @@ export function buildFcrMergeObservation(args: {
       configuredEvaluators: policy.evaluators.map((evaluator) => evaluator.type).sort(),
       requiredEvaluators: [...(policy.merge?.requiredEvaluators ?? [])].sort(),
       requiredApprovals: policy.merge?.requiredApprovals ?? 0,
+      effectiveRequiredApprovals: approvalEvidence?.required ?? 0,
       requireFreshBase: policy.merge?.requireFreshBase === true,
       allowForce: policy.merge?.allowForce === true,
       ...(policy.configError !== undefined ? { configError: policy.configError } : {}),
