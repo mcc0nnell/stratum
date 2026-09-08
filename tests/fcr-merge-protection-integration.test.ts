@@ -6,7 +6,7 @@ import type { Change } from "../src/types";
 import type { Logger } from "../src/utils/logger";
 
 vi.mock("../src/fcr/merge-observation", () => ({
-  observeStratumMergeProtection: vi.fn(async () => undefined),
+  observeStratumMergeProtection: vi.fn(() => undefined),
 }));
 
 const mockLogger: Logger = {
@@ -96,7 +96,7 @@ describe("FCR merge-protection observation", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.allowed).toBe(false);
-    expect(observeStratumMergeProtection).toHaveBeenCalledWith(db, mockLogger, {
+    expect(observeStratumMergeProtection).toHaveBeenCalledWith(mockLogger, {
       change,
       policy,
       protection: {
@@ -129,7 +129,7 @@ describe("FCR merge-protection observation", () => {
     expect(result.success).toBe(true);
     if (!result.success) return;
     expect(result.data.allowed).toBe(false);
-    expect(observeStratumMergeProtection).toHaveBeenCalledWith(db, mockLogger, {
+    expect(observeStratumMergeProtection).toHaveBeenCalledWith(mockLogger, {
       change: protectedChange,
       policy,
       protection: {
