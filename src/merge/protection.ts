@@ -18,8 +18,7 @@ interface ProtectionEvidenceSnapshot {
   requiredEvaluators: Array<{
     evaluatorType: string;
     status: "passed" | "failed" | "missing";
-    reason: string;
-    score?: number;
+    runId?: string;
     ranAt?: string;
   }>;
   approvals?: {
@@ -78,18 +77,14 @@ export async function checkMergeProtection(
       );
     }
 
-    const latestByType = new Map<
-      string,
-      { passed: boolean; ranAt: string; reason: string; score: number }
-    >();
+    const latestByType = new Map<string, { id: string; passed: boolean; ranAt: string }>();
     for (const run of runsResult.data) {
       const current = latestByType.get(run.evaluatorType);
       if (!current || run.ranAt >= current.ranAt) {
         latestByType.set(run.evaluatorType, {
+          id: run.id,
           passed: run.passed,
           ranAt: run.ranAt,
-          reason: run.reason,
-          score: run.score,
         });
       }
     }
@@ -97,19 +92,16 @@ export async function checkMergeProtection(
     for (const required of merge.requiredEvaluators) {
       const latest = latestByType.get(required);
       if (!latest) {
-        const reason = `Required evaluator '${required}' has not run`;
-        reasons.push(reason);
+        reasons.push(`Required evaluator '${required}' has not run`);
         evidence.requiredEvaluators.push({
           evaluatorType: required,
           status: "missing",
-          reason,
         });
       } else {
         evidence.requiredEvaluators.push({
           evaluatorType: required,
           status: latest.passed ? "passed" : "failed",
-          reason: latest.reason,
-          score: latest.score,
+          runId: latest.id,
           ranAt: latest.ranAt,
         });
         if (!latest.passed) {
