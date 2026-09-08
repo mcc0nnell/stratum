@@ -1,4 +1,5 @@
 import type { EvalPolicy } from "../evaluation/types";
+import { observeStratumMergeProtection } from "../fcr/merge-observation";
 import { countApprovals } from "../storage/change-reviews";
 import { listEvalRuns } from "../storage/eval-runs";
 import type { Change } from "../types";
@@ -24,14 +25,21 @@ export async function checkMergeProtection(
   change: Change,
   policy: EvalPolicy,
 ): Promise<Result<ProtectionVerdict, AppError>> {
+  const observeVerdict = async (
+    verdict: ProtectionVerdict,
+  ): Promise<Result<ProtectionVerdict, AppError>> => {
+    await observeStratumMergeProtection(db, logger, { change, policy, protection: verdict });
+    return ok(verdict);
+  };
+
   // Fail closed on a malformed policy file rather than silently running on the
   // permissive default.
   if (policy.configError) {
-    return ok({ allowed: false, reasons: [policy.configError] });
+    return observeVerdict({ allowed: false, reasons: [policy.configError] });
   }
 
   const merge = policy.merge;
-  if (!merge) return ok({ allowed: true, reasons: [] });
+  if (!merge) return observeVerdict({ allowed: true, reasons: [] });
 
   const reasons: string[] = [];
 
@@ -80,5 +88,5 @@ export async function checkMergeProtection(
   if (reasons.length > 0) {
     logger.info("Merge blocked by branch protection", { changeId: change.id, reasons });
   }
-  return ok({ allowed: reasons.length === 0, reasons });
+  return observeVerdict({ allowed: reasons.length === 0, reasons });
 }
