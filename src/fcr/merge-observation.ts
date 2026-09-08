@@ -12,6 +12,7 @@ export interface FcrMergeWitness {
   required: true;
   status: FcrWitnessStatus;
   reason: string;
+  evaluatorType?: string;
   sourceRef?: string;
   observedAt?: string;
   requiredCount?: number;
@@ -97,6 +98,7 @@ export function buildFcrMergeObservation(args: {
             ? "contradicted"
             : "unproven",
       reason: evaluatorReason(evidence.evaluatorType, evidence.status),
+      evaluatorType: evidence.evaluatorType,
       ...(evidence.runId !== undefined ? { sourceRef: evidence.runId } : {}),
       ...(evidence.ranAt !== undefined ? { observedAt: evidence.ranAt } : {}),
     }),
