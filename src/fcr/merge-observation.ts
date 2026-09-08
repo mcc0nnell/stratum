@@ -1,7 +1,5 @@
 import type { EvalPolicy } from "../evaluation/types";
 import { recordAudit } from "../storage/audit";
-import { countApprovals } from "../storage/change-reviews";
-import { type EvalRun, listEvalRuns } from "../storage/eval-runs";
 import type { Change } from "../types";
 import type { Logger } from "../utils/logger";
 
@@ -12,13 +10,31 @@ export type FcrWitnessStatus = "satisfied" | "contradicted" | "unproven";
 export interface FcrMergeWitness {
   id: string;
   kind: "evaluator" | "approval";
-  required: boolean;
+  required: true;
   status: FcrWitnessStatus;
   reason: string;
   score?: number;
   ranAt?: string;
   requiredCount?: number;
   observedCount?: number;
+}
+
+export interface FcrProtectionVerdict {
+  allowed: boolean;
+  reasons: string[];
+  evidence: {
+    requiredEvaluators: Array<{
+      evaluatorType: string;
+      status: "passed" | "failed" | "missing";
+      reason: string;
+      score?: number;
+      ranAt?: string;
+    }>;
+    approvals?: {
+      required: number;
+      observed: number;
+    };
+  };
 }
 
 export interface FcrMergeObservation {
@@ -49,8 +65,7 @@ export interface FcrMergeObservation {
     configError?: string;
   };
   evidence: {
-    evaluatorRunsAvailable: boolean;
-    approvalsAvailable: boolean;
+    snapshotSource: "merge_protection_verdict";
     witnesses: FcrMergeWitness[];
   };
   advisoryJudgment: {
@@ -59,88 +74,40 @@ export interface FcrMergeObservation {
   };
 }
 
-export interface FcrProtectionVerdict {
-  allowed: boolean;
-  reasons: string[];
-}
-
-function latestRunsByEvaluator(runs: EvalRun[]): Map<string, EvalRun> {
-  const latest = new Map<string, EvalRun>();
-  for (const run of runs) {
-    const current = latest.get(run.evaluatorType);
-    if (
-      !current ||
-      run.ranAt > current.ranAt ||
-      (run.ranAt === current.ranAt && run.id > current.id)
-    ) {
-      latest.set(run.evaluatorType, run);
-    }
-  }
-  return latest;
-}
-
 export function buildFcrMergeObservation(args: {
   change: Change;
   policy: EvalPolicy;
   protection: FcrProtectionVerdict;
-  evalRuns: EvalRun[];
-  evaluatorRunsAvailable: boolean;
-  approvalCount?: number;
-  approvalsAvailable: boolean;
 }): FcrMergeObservation {
   const { change, policy, protection } = args;
-  const requiredEvaluators = [...(policy.merge?.requiredEvaluators ?? [])].sort();
-  const requiredEvaluatorSet = new Set(requiredEvaluators);
-  const latestRuns = latestRunsByEvaluator(args.evalRuns);
-  const witnesses: FcrMergeWitness[] = [];
+  const witnesses: FcrMergeWitness[] = protection.evidence.requiredEvaluators.map((evidence) => ({
+    id: `evaluator:${evidence.evaluatorType}`,
+    kind: "evaluator",
+    required: true,
+    status:
+      evidence.status === "passed"
+        ? "satisfied"
+        : evidence.status === "failed"
+          ? "contradicted"
+          : "unproven",
+    reason: evidence.reason,
+    ...(evidence.score !== undefined ? { score: evidence.score } : {}),
+    ...(evidence.ranAt !== undefined ? { ranAt: evidence.ranAt } : {}),
+  }));
 
-  for (const evaluatorType of [...latestRuns.keys()].sort()) {
-    const run = latestRuns.get(evaluatorType);
-    if (!run) continue;
-    witnesses.push({
-      id: `evaluator:${evaluatorType}`,
-      kind: "evaluator",
-      required: requiredEvaluatorSet.has(evaluatorType),
-      status: run.passed ? "satisfied" : "contradicted",
-      reason: run.reason,
-      score: run.score,
-      ranAt: run.ranAt,
-    });
-  }
-
-  for (const evaluatorType of requiredEvaluators) {
-    if (latestRuns.has(evaluatorType)) continue;
-    witnesses.push({
-      id: `evaluator:${evaluatorType}`,
-      kind: "evaluator",
-      required: true,
-      status: "unproven",
-      reason: `Required evaluator '${evaluatorType}' has not run`,
-    });
-  }
-
-  const requiredApprovals = policy.merge?.requiredApprovals ?? 0;
-  if (requiredApprovals > 0) {
-    const observedCount = args.approvalCount;
+  const approvalEvidence = protection.evidence.approvals;
+  if (approvalEvidence !== undefined) {
     witnesses.push({
       id: "approval:human",
       kind: "approval",
       required: true,
       status:
-        observedCount === undefined
-          ? "unproven"
-          : observedCount >= requiredApprovals
-            ? "satisfied"
-            : "contradicted",
-      reason:
-        observedCount === undefined
-          ? `Required approval count could not be observed (requires ${requiredApprovals})`
-          : `Requires ${requiredApprovals} approval${requiredApprovals === 1 ? "" : "s"}, has ${observedCount}`,
-      requiredCount: requiredApprovals,
-      ...(observedCount !== undefined ? { observedCount } : {}),
+        approvalEvidence.observed >= approvalEvidence.required ? "satisfied" : "contradicted",
+      reason: `Requires ${approvalEvidence.required} approval${approvalEvidence.required === 1 ? "" : "s"}, has ${approvalEvidence.observed}`,
+      requiredCount: approvalEvidence.required,
+      observedCount: approvalEvidence.observed,
     });
   }
-
   witnesses.sort((a, b) => a.id.localeCompare(b.id));
 
   return {
@@ -168,15 +135,14 @@ export function buildFcrMergeObservation(args: {
     },
     policy: {
       configuredEvaluators: policy.evaluators.map((evaluator) => evaluator.type).sort(),
-      requiredEvaluators,
-      requiredApprovals,
+      requiredEvaluators: [...(policy.merge?.requiredEvaluators ?? [])].sort(),
+      requiredApprovals: policy.merge?.requiredApprovals ?? 0,
       requireFreshBase: policy.merge?.requireFreshBase === true,
       allowForce: policy.merge?.allowForce === true,
       ...(policy.configError !== undefined ? { configError: policy.configError } : {}),
     },
     evidence: {
-      evaluatorRunsAvailable: args.evaluatorRunsAvailable,
-      approvalsAvailable: args.approvalsAvailable,
+      snapshotSource: "merge_protection_verdict",
       witnesses,
     },
     advisoryJudgment: {
@@ -187,9 +153,9 @@ export function buildFcrMergeObservation(args: {
 }
 
 /**
- * Emit an OBSERVE-only FCR envelope for Stratum's existing merge-protection decision.
- * Evidence collection is deliberately best-effort: it must never block, authorize,
- * or otherwise change the merge decision it describes.
+ * Persist an OBSERVE-only projection of the verdict Stratum already produced.
+ * The envelope contains only evidence captured by that verdict; it never re-reads
+ * mutable evaluator or approval state after the decision.
  */
 export async function observeStratumMergeProtection(
   db: D1Database,
@@ -201,32 +167,7 @@ export async function observeStratumMergeProtection(
   },
 ): Promise<void> {
   try {
-    const requiredApprovals = args.policy.merge?.requiredApprovals ?? 0;
-    const [evalRunsResult, approvalsResult] = await Promise.all([
-      listEvalRuns(db, logger, args.change.id),
-      requiredApprovals > 0 ? countApprovals(db, logger, args.change.id) : Promise.resolve(null),
-    ]);
-
-    const evaluatorRunsAvailable = evalRunsResult.success;
-    if (!evalRunsResult.success) {
-      logger.warn("FCR observer could not load evaluator runs", { changeId: args.change.id });
-    }
-
-    const approvalsAvailable = approvalsResult === null || approvalsResult.success;
-    if (approvalsResult !== null && !approvalsResult.success) {
-      logger.warn("FCR observer could not load approval count", { changeId: args.change.id });
-    }
-
-    const observation = buildFcrMergeObservation({
-      ...args,
-      evalRuns: evalRunsResult.success ? evalRunsResult.data : [],
-      evaluatorRunsAvailable,
-      ...(approvalsResult !== null && approvalsResult.success
-        ? { approvalCount: approvalsResult.data }
-        : {}),
-      approvalsAvailable,
-    });
-
+    const observation = buildFcrMergeObservation(args);
     await recordAudit(db, logger, {
       action: "fcr.merge.observed",
       actorType: "system",
