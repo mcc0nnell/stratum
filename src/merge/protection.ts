@@ -40,11 +40,11 @@ export async function checkMergeProtection(
   change: Change,
   policy: EvalPolicy,
 ): Promise<Result<ProtectionVerdict, AppError>> {
-  const observeVerdict = async (
+  const observeVerdict = (
     verdict: ProtectionVerdict,
     evidence: ProtectionEvidenceSnapshot,
-  ): Promise<Result<ProtectionVerdict, AppError>> => {
-    await observeStratumMergeProtection(db, logger, {
+  ): Result<ProtectionVerdict, AppError> => {
+    observeStratumMergeProtection(logger, {
       change,
       policy,
       protection: { ...verdict, evidence },
