@@ -16,7 +16,6 @@ export type AuditAction =
   | "webhook.toggled"
   | "webhook.deleted"
   | "merge.forced"
-  | "fcr.merge.observed"
   | "conflict.resolved_manually"
   | "review.approvals_dismissed"
   | "backup.run"
