@@ -32,31 +32,29 @@ The word **claim** is deliberate. A Worker version tag binds that string to a Cl
 
 When version metadata is absent or malformed, FCR omits `producerDeployment`. Merge protection remains unchanged.
 
-## External version-tagged deployment
+## Deployment authority stays outside Stratum
 
-For the FCR proving path, deploy with:
+Stratum does not upload, prove, or promote a Worker version as part of this FCR slice. The application is only a passive runtime identity producer.
 
-```bash
-scripts/deploy-fcr-versioned.sh staging
+A deployment that wants this field must supply Cloudflare's Version Metadata binding:
+
+```toml
+[version_metadata]
+binding = "CF_VERSION_METADATA"
 ```
 
-or provide the exact source SHA explicitly:
+Cloudflare Wrangler bindings are non-inheritable, so named environments need the same binding in their own environment configuration rather than relying on the top-level binding.
 
-```bash
-scripts/deploy-fcr-versioned.sh staging 0123456789abcdef0123456789abcdef01234567
-```
+For the assurance path, an external release authority should:
 
-The helper:
+1. materialize the intended immutable source object;
+2. prepare the deployment configuration, including Version Metadata, outside Stratum's decision path;
+3. upload a Worker version tagged with the source-object claim;
+4. preserve the exact uploaded version identity and runtime module bytes;
+5. independently compare those bytes with the bundle produced for that source object;
+6. promote that exact Worker version only after the external proof passes.
 
-1. validates the source SHA;
-2. copies `wrangler.toml` to a temporary config in the repository root;
-3. adds the Version Metadata binding only to the selected Wrangler environment;
-4. runs `wrangler deploy --tag <source-sha>`;
-5. deletes the temporary config on exit.
-
-Named Wrangler environments do not inherit bindings, so staging and production receive the binding in their own environment table when selected.
-
-The base `wrangler.toml` is not rewritten by this experimental assurance path. Ordinary self-hosted and maintainer deploy commands therefore retain their existing behavior.
+WindAnvil's generic Cloudflare Worker source-binding work is the first implementation of that pattern. Stratum does not call WindAnvil and cannot convert an assurance result into merge authority.
 
 ## Authority boundary
 
@@ -80,13 +78,15 @@ The version-metadata parser is local and fail-soft: unavailable or malformed met
 With the paired WindAnvil work, the intended chain becomes:
 
 ```text
-Stratum merge-protection reads
+immutable source object X
         ↓
-FCR raw premise handoff
-        +
-Cloudflare Worker version identity
+external Worker upload + byte proof
         ↓
-WindAnvil exact-byte capture
+Cloudflare Worker version V
+        ↓
+Stratum runtime reports V in FCR handoff
+        ↓
+WindAnvil exact-byte handoff capture
         ↓
 content-addressed evidence object
         ↓
@@ -95,4 +95,6 @@ WindAnvil premise → witness reconstruction
 WindAnvil witness → advisory reconstruction
 ```
 
-The remaining source-attestation question is narrower: independently prove that the Worker version tagged with Git SHA `X` was built from Git object `X`. The FCR handoff does not claim that proof exists until a separate assurance source can establish it.
+A separate assurance record can therefore bind `workerVersionId = V` to an externally proven source/bundle relation without letting Stratum self-certify.
+
+The current byte proof still does **not** imply hermetic build provenance: dependency state, Wrangler/toolchain identity, environment, plugins, and other build inputs remain a separate assurance threshold. Keeping that boundary explicit is intentional.
